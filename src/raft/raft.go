@@ -20,7 +20,7 @@ package raft
 import (
 	//	"bytes"
 	// "crypto/aes"
-	// "log"
+	log1 "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -58,9 +58,10 @@ type ApplyMsg struct {
 //
 
 type Log struct{
-	Command string
+	Command interface{}
 	Index   int64
-	Term   int64
+	Term    int64
+	Commit  bool
 }
 
 type Raft struct {
@@ -71,10 +72,14 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	currentTerm int64
-	logEntries  []Log
+	logEntries  []*Log
 	isLeader    bool
 	voteFor     map[int64]bool
 	refreshTicker  chan int
+	nextIndex   map[int]int
+	applyCh     chan ApplyMsg
+	commitIdx   int
+	commitMap   map[int]bool
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -265,26 +270,75 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 type AppendEntriesArgs struct{
-	LogEntries []Log // appendEntries
-	PrevLog    Log // prevLog
+	LogEntries []*Log // appendEntries
+	PrevLog    *Log // prevLog
 	Term       int
+	CommitIdx  int
 }
 
 type AppendEntriesReply struct{
-	Recevied bool
+	Server   int
+	XTerm    int
+	XIndex   int
+	// XLen     int
+	Reject   bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// log.Printf("slave %d recive AE from term %d",rf.me, args.Term)
-
+	
+	reply.Server = rf.me
 	rf.currentTerm = int64(args.Term)
 	if rf.isLeader {
 		rf.isLeader = false
 	}
 	if len(rf.refreshTicker) == 0{
 		rf.refreshTicker <- 1
+	}
+	
+	// the first Log Or feedBack to the first log
+	if args.PrevLog == nil {
+		rf.commitIdx = args.CommitIdx
+		reply.Reject = false
+		rf.logEntries = appendLog(rf.logEntries, 0, args.LogEntries)
+		return 
+	}
+	// log1.Printf("slave %d recive AE content is %+v, prevLog : %+v",rf.me, args, args.PrevLog)
+
+	if len(rf.logEntries) == int(args.PrevLog.Index)  {
+		prevLog := rf.logEntries[args.PrevLog.Index-1]
+		if prevLog.Term == args.PrevLog.Term {
+			// perfect case
+			// 4 5 5 
+			// 4 5 5 6
+			reply.Reject = false
+			rf.commitIdx = args.CommitIdx
+			rf.logEntries = appendLog(rf.logEntries, int(prevLog.Index), args.LogEntries)
+			// for _, l := range rf.logEntries {
+			// 	log1.Printf("%d %+v",rf.me, l)
+			// }
+			// log1.Printf("slave %d recive AE content is %+v, slave prevLog : %+v, reply : %+v, logentries : %+v",rf.me, args, prevLog, reply, rf.logEntries)
+			return		
+		}else {
+			// case1			case2 
+			// S1 : 4 5 5 		S1 : 4 4 4 
+			// S2 : 4 6 6 6		S2 : 4 6 6 6
+			log := binaraySearch(rf.logEntries, int(prevLog.Term))
+			reply.Reject = true
+			reply.XIndex = int(log.Index)
+			reply.XTerm = int(log.Term)
+			return
+		}
+	} else {
+		// case3
+		// S1 : 4 
+		// S2 : 4 6 6 6 
+		reply.Reject = true
+		reply.XTerm = -1
+		// reply.XLen = 
+		reply.XIndex = len(rf.logEntries)+1
+		return
 	}
 }
 
@@ -313,6 +367,32 @@ func (rf *Raft) heartsbeatsTicker() {
 	}
 }
 
+func (rf *Raft) commitTicker(){
+	for {
+		rf.mu.Lock()
+		idx := binaraySearchCommit(rf.logEntries)
+		if idx != -1 && !rf.logEntries[idx].Commit{
+			// log1.Printf("server %d: commitIdx %+v, idx : %+v",rf.me, rf.commitIdx, idx)
+			for i:=idx; i<rf.commitIdx; i++{
+				log := rf.logEntries[i]
+				if _, ok := rf.commitMap[int(log.Index)]; !ok {
+					applyMsg := ApplyMsg{
+						CommandValid:  true,
+						Command: log.Command,
+						CommandIndex: int(log.Index),
+					}
+					rf.applyCh <- applyMsg
+					rf.commitMap[int(log.Index)] = true
+					log1.Printf("server %+v commit log : %+v", rf.me, log.Index)
+				}
+				log.Commit = true
+			}
+		}
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(10)*time.Millisecond)
+	}
+}
+
 func (rf *Raft) heartsbeats(){
 	// log.Printf("%d slave is leader ? %+v",rf.me, rf.isLeader)
 	if rf.isLeader {
@@ -320,22 +400,98 @@ func (rf *Raft) heartsbeats(){
 		if len(rf.refreshTicker) == 0{
 			rf.refreshTicker<-1
 		}
-		wg := &sync.WaitGroup{}
+
+		reciver := make(chan AppendEntriesReply, len(rf.peers)-1)
+		got := 1 
+		commit := 1
+
 		for server := range rf.peers{
 			if server == rf.me {
 				continue
 			}
-			wg.Add(1)
-			go func (server int)  {
+
+			// assume nextIdx start from current last log index
+			nextIdx := len(rf.logEntries)
+			if idx, ok := rf.nextIndex[server]; ok{
+				nextIdx = idx
+			}
+			
+			// initial the prevLog and appendLogs, assume that all the slave's next index is current append idx
+			var prevLog *Log
+			appendEntries := make([]*Log, 0)
+
+			// structure the append entries
+			if nextIdx > 0 {
+				for i:=nextIdx; i<=len(rf.logEntries); i++{
+					appendEntries = append(appendEntries, &Log{
+						Command: rf.logEntries[i-1].Command,
+						Index: rf.logEntries[i-1].Index,
+						Term: rf.logEntries[i-1].Term,
+						Commit: rf.logEntries[i-1].Commit,
+					})
+				} 
+			}
+
+			// get prevLog nextIdx - 1 - 1
+			if nextIdx > 1{
+				prevLog = new(Log)
+				*prevLog = *rf.logEntries[nextIdx-2]
+			}
+			term := int(rf.currentTerm)
+			commitIdx := rf.commitIdx
+
+			go func (server, term, commitIdx int, prevLog *Log, appendEntries []*Log)  {
 				args := &AppendEntriesArgs{
-					Term: int(rf.currentTerm),
+					LogEntries: appendEntries,
+					Term: term,
+					PrevLog: prevLog,
+					CommitIdx: commitIdx,
 				}
-				reply := &AppendEntriesReply{}
+				reply := &AppendEntriesReply{
+					XTerm: -1,
+					XIndex: -1,
+				}
 				rf.sendAppendEntries(server, args, reply)
-				wg.Done()
-			}(server)
+				
+				reciver <- *reply
+			}(server, term, commitIdx, prevLog, appendEntries)
 		}
-		wg.Wait()
+
+		for reply := range reciver{
+			log1.Println(reply)
+			if !reply.Reject {
+				commit++
+			}
+			// server reject appendEntries
+			if reply.Reject {
+				if reply.XTerm == -1 && reply.XIndex != -1 {
+					rf.nextIndex[reply.Server] = int(reply.XIndex)
+				}
+				if reply.XTerm != -1 {
+					log := binaraySearchForLd(rf.logEntries, reply.XTerm)
+					if log.Term == int64(reply.XTerm) {
+						rf.nextIndex[reply.Server] = int(log.Index)
+					}else{
+						rf.nextIndex[reply.Server] = reply.XIndex
+					}
+				}
+			}
+			got++
+			if commit > len(rf.peers)/2 {
+				break
+			}
+			if got == len(rf.peers) {
+				break
+			}
+		}
+		
+		if commit > len(rf.peers)/2 {
+			// if len(rf.logEntries) > 0 {
+			// 	rf.logEntries[len(rf.logEntries)-1].Commit = true
+			// }
+			rf.commitIdx = len(rf.logEntries)
+		}
+		log1.Printf("leader %d end AE and commit is %d, got is %d, commitIdx is %d", rf.me, commit, got, rf.commitIdx)
 	}
 }
 
@@ -354,14 +510,37 @@ func (rf *Raft) heartsbeats(){
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
 
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
+	// build the return value
+	index := len(rf.logEntries)+1
+	term := rf.currentTerm
+	isLeader := rf.isLeader
+
+	if !isLeader {
+		return int(index), int(term), isLeader
+	}
+
+	log1.Printf("leader %d called start",rf.me)
+
+	log := &Log{
+		Command: command,
+		Index: int64(index),
+		Term: term,
+		Commit: false,
+	}
+	rf.logEntries = append(rf.logEntries, log)
+
+	go func(){	
+		rf.mu.Lock()
+		rf.heartsbeats()
+		rf.mu.Unlock()
+	}()
+
+	return index, int(term), isLeader
 	// Your code here (2B).
-
-
-	return index, term, isLeader
 }
 
 //
@@ -431,7 +610,6 @@ func (rf *Raft) ticker() {
 				}
 				// log.Printf("slave %d recive :%+v, cnt : %+v", rf.me, res, voted)
 				if voted > len(rf.peers)/2{
-					rf.isLeader = true
 					break
 				}
 				if recvies == len(rf.peers)-1{
@@ -452,7 +630,7 @@ func (rf *Raft) ticker() {
 					CurrentTerm: rf.currentTerm,
 				}
 				if len (rf.logEntries) > 0{
-					args.LastLog = &rf.logEntries[len(rf.logEntries)-1]
+					args.LastLog = rf.logEntries[len(rf.logEntries)-1]
 				}
 				reply := &RequestVoteReply{}
 				// log.Printf("slave %d request vote term %d from %d reply", rf.me, rf.currentTerm, server)
@@ -464,6 +642,9 @@ func (rf *Raft) ticker() {
 			}(server)
 		}
 		wg.Wait()
+		if voted > len(rf.peers)/2{
+			rf.isLeader = true
+		}
 		close(voteReply)
 		rf.heartsbeats()
 		// log.Printf("slave %d end leader election res : %+v, currentTerm : %+v",rf.me,rf.isLeader, rf.currentTerm)
@@ -492,9 +673,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.currentTerm = 1
 	rf.isLeader = false
-	rf.logEntries = make([]Log, 0)
+	rf.logEntries = make([]*Log, 0)
 	rf.voteFor = make(map[int64]bool)
 	rf.refreshTicker = make(chan int, 1)
+	rf.applyCh = applyCh
+	rf.commitIdx = 0
+	rf.commitMap = make(map[int]bool)
+	rf.nextIndex = make(map[int]int)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -502,7 +687,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.heartsbeatsTicker()
-
+	go rf.commitTicker()
 
 	return rf
 }

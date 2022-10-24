@@ -505,6 +505,8 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
 
+		// log.Printf("%+v, %+v, %+v\n",i, cmd1, ok)
+
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
@@ -577,11 +579,13 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
+					log.Printf("server %d commit %d",starts,index1)
 					index = index1
 					break
 				}
 			}
 		}
+
 
 		if index != -1 {
 			// somebody claimed to be the leader and to have
@@ -589,6 +593,8 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+
+				// log.Printf("%+v %+v\n",nd, cmd1)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd1 == cmd {
