@@ -20,7 +20,7 @@ package raft
 import (
 	//	"bytes"
 	// "crypto/aes"
-	log1 "log"
+	// log1 "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -41,6 +41,7 @@ import (
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
 //
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -80,6 +81,7 @@ type Raft struct {
 	applyCh     chan ApplyMsg
 	commitIdx   int
 	commitMap   map[int]bool
+	// candidateTerm int
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -186,19 +188,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// log.Printf("slave %d recive a vote request %+v, is it voted else? %+v",rf.me, args, rf.voteFor[args.CurrentTerm])
-
-
+	
+	// log1.Printf("server %d revice vote request : %+v, currentTerm : %+v",rf.me ,args, rf.currentTerm)
+	
 	if voted, ok := rf.voteFor[args.CurrentTerm]; ok && voted{
 		reply.Vote = false
 		return
+	}
+
+	if rf.currentTerm < args.CurrentTerm {
+		rf.currentTerm = args.CurrentTerm
 	}
 
 	if len(rf.logEntries) == 0 {
 		if rf.currentTerm <= args.CurrentTerm {
 			rf.currentTerm = args.CurrentTerm
 			reply.Vote = true
-			rf.voteFor[args.CurrentTerm] = true
+			rf.voteFor[rf.currentTerm] = true
 			return
 		}else{
 			reply.Vote = false
@@ -207,6 +213,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	
 	lastLog := rf.logEntries[len(rf.logEntries)-1]
+
+	// log1.Printf("slave %d recive a vote request %+v, prevLog : %+v, my prevLog : %+v",rf.me, args, args.LastLog, lastLog)
 	if args.LastLog == nil || args.CurrentTerm < rf.currentTerm || args.LastLog.Term < lastLog.Term{
 		reply.Vote = false
 		return
@@ -215,8 +223,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLog.Term >= lastLog.Term {
 		if args.LastLog.Term > lastLog.Term || args.LastLog.Index >= lastLog.Index{
 			reply.Vote = true
-			rf.voteFor[args.CurrentTerm] = true
 			rf.currentTerm = args.CurrentTerm
+			rf.voteFor[rf.currentTerm] = true
 			return
 		}
 	}
@@ -282,6 +290,7 @@ type AppendEntriesReply struct{
 	XIndex   int
 	// XLen     int
 	Reject   bool
+	Recive   bool
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply){
@@ -289,6 +298,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 	
 	reply.Server = rf.me
+
+
+	// log1.Printf("server %d recive a heartsbeats : %+v", rf.me, args)
+	if rf.currentTerm > int64(args.Term) || rf.commitIdx > args.CommitIdx{
+		reply.Recive = false
+		return
+	}
+
+	// log1.Printf("server %d recive ae :%+v", rf.me, args.LogEntries)
+	
+	reply.Recive = true
+	
 	rf.currentTerm = int64(args.Term)
 	if rf.isLeader {
 		rf.isLeader = false
@@ -297,17 +318,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.refreshTicker <- 1
 	}
 	
+	// log1.Printf("server %d recive ae :%+v", rf.me, args.LogEntries)
+	if len(args.LogEntries) == 0 {
+		rf.commitIdx = args.CommitIdx
+		reply.Reject = false
+		return
+	}
+	
 	// the first Log Or feedBack to the first log
 	if args.PrevLog == nil {
 		rf.commitIdx = args.CommitIdx
-		reply.Reject = false
 		rf.logEntries = appendLog(rf.logEntries, 0, args.LogEntries)
+		reply.Reject = false
+		reply.XIndex = len(rf.logEntries)+1
 		return 
 	}
-	// log1.Printf("slave %d recive AE content is %+v, prevLog : %+v",rf.me, args, args.PrevLog)
-
-	if len(rf.logEntries) == int(args.PrevLog.Index)  {
+	
+	if len(rf.logEntries) >= int(args.PrevLog.Index)  {
 		prevLog := rf.logEntries[args.PrevLog.Index-1]
+		// log1.Printf("server %d recive ae prevLog :%+v, my prevLog : %+v", rf.me, args.PrevLog, prevLog)
 		if prevLog.Term == args.PrevLog.Term {
 			// perfect case
 			// 4 5 5 
@@ -315,6 +344,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Reject = false
 			rf.commitIdx = args.CommitIdx
 			rf.logEntries = appendLog(rf.logEntries, int(prevLog.Index), args.LogEntries)
+			reply.XIndex = len(rf.logEntries)+1
 			// for _, l := range rf.logEntries {
 			// 	log1.Printf("%d %+v",rf.me, l)
 			// }
@@ -372,7 +402,7 @@ func (rf *Raft) commitTicker(){
 		rf.mu.Lock()
 		idx := binaraySearchCommit(rf.logEntries)
 		if idx != -1 && !rf.logEntries[idx].Commit{
-			// log1.Printf("server %d: commitIdx %+v, idx : %+v",rf.me, rf.commitIdx, idx)
+			// log1.Printf("server %d: commitIdx %+v, idx : %+v, len of logEntries : %+v",rf.me, rf.commitIdx, idx, len(rf.logEntries))
 			for i:=idx; i<rf.commitIdx; i++{
 				log := rf.logEntries[i]
 				if _, ok := rf.commitMap[int(log.Index)]; !ok {
@@ -383,7 +413,7 @@ func (rf *Raft) commitTicker(){
 					}
 					rf.applyCh <- applyMsg
 					rf.commitMap[int(log.Index)] = true
-					log1.Printf("server %+v commit log : %+v", rf.me, log.Index)
+					// log1.Printf("server %+v commit log : %+v", rf.me, log)
 				}
 				log.Commit = true
 			}
@@ -404,7 +434,9 @@ func (rf *Raft) heartsbeats(){
 		reciver := make(chan AppendEntriesReply, len(rf.peers)-1)
 		got := 1 
 		commit := 1
+		recive := 1
 
+		cnt := 0
 		for server := range rf.peers{
 			if server == rf.me {
 				continue
@@ -433,12 +465,16 @@ func (rf *Raft) heartsbeats(){
 			}
 
 			// get prevLog nextIdx - 1 - 1
-			if nextIdx > 1{
+			if nextIdx > 1 && len(appendEntries) != 0{
 				prevLog = new(Log)
 				*prevLog = *rf.logEntries[nextIdx-2]
+				prevLog.Command = ""
 			}
 			term := int(rf.currentTerm)
 			commitIdx := rf.commitIdx
+			
+			// log1.Printf("args is %+v, to server %d who's nextIdx is %+v, commit is %+v",appendEntries, server, nextIdx, rf.commitIdx)
+			cnt += len(appendEntries)
 
 			go func (server, term, commitIdx int, prevLog *Log, appendEntries []*Log)  {
 				args := &AppendEntriesArgs{
@@ -451,47 +487,53 @@ func (rf *Raft) heartsbeats(){
 					XTerm: -1,
 					XIndex: -1,
 				}
-				rf.sendAppendEntries(server, args, reply)
-				
+				ok := rf.sendAppendEntries(server, args, reply)
+				if !ok {
+					reply.Reject = true
+				}
 				reciver <- *reply
 			}(server, term, commitIdx, prevLog, appendEntries)
 		}
 
 		for reply := range reciver{
-			log1.Println(reply)
+			// log1.Println(reply)
+			if reply.Recive{
+				recive++
+			}
 			if !reply.Reject {
 				commit++
 			}
-			// server reject appendEntries
-			if reply.Reject {
-				if reply.XTerm == -1 && reply.XIndex != -1 {
-					rf.nextIndex[reply.Server] = int(reply.XIndex)
-				}
-				if reply.XTerm != -1 {
-					log := binaraySearchForLd(rf.logEntries, reply.XTerm)
-					if log.Term == int64(reply.XTerm) {
-						rf.nextIndex[reply.Server] = int(log.Index)
-					}else{
-						rf.nextIndex[reply.Server] = reply.XIndex
-					}
+			// maintain the nextIdx
+			if reply.XTerm == -1 && reply.XIndex != -1 {
+				rf.nextIndex[reply.Server] = int(reply.XIndex)
+			}
+			if reply.XTerm != -1 {
+				log := binaraySearchForLd(rf.logEntries, reply.XTerm)
+				if log.Term == int64(reply.XTerm) {
+					rf.nextIndex[reply.Server] = int(log.Index)
+				}else{
+					rf.nextIndex[reply.Server] = reply.XIndex
 				}
 			}
 			got++
-			if commit > len(rf.peers)/2 {
-				break
-			}
 			if got == len(rf.peers) {
 				break
 			}
 		}
-		
+
+		if recive <= len(rf.peers)/2 {
+			// log1.Printf("leader %d is not leader anymore", rf.me)
+			rf.isLeader = false
+		}
 		if commit > len(rf.peers)/2 {
 			// if len(rf.logEntries) > 0 {
 			// 	rf.logEntries[len(rf.logEntries)-1].Commit = true
 			// }
 			rf.commitIdx = len(rf.logEntries)
 		}
-		log1.Printf("leader %d end AE and commit is %d, got is %d, commitIdx is %d", rf.me, commit, got, rf.commitIdx)
+		
+		// log1.Printf("leader %d end AE and commit is %d, got is %d, commitIdx is %d", rf.me, commit, got, rf.commitIdx)
+		// log1.Printf("this time heartsBeats send %d log, nextIndexMap :%+v, commited : %+v", cnt, rf.nextIndex, commit)
 	}
 }
 
@@ -523,7 +565,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return int(index), int(term), isLeader
 	}
 
-	log1.Printf("leader %d called start",rf.me)
+	// log1.Printf("leader %d called start",rf.me)
 
 	log := &Log{
 		Command: command,
@@ -538,7 +580,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.heartsbeats()
 		rf.mu.Unlock()
 	}()
-
+	// time.Sleep(time.Duration(50)*time.Millisecond)
+	// if rf.commitIdx == index {
+	// 	return index, int(term), isLeader
+	// }
 	return index, int(term), isLeader
 	// Your code here (2B).
 }
@@ -577,7 +622,7 @@ func (rf *Raft) ticker() {
 		
 		sleepTime := 150*(1+random.Float64())
 		// Output(fmt.Sprintf("slave %d sleep time : %+v", rf.me, sleepTime))
-		// log.Printf("slave %d sleep time : %+v",rf.me ,sleepTime)
+		// log1.Printf("slave %d sleep time : %+v",rf.me ,sleepTime)
 		time.Sleep(time.Duration(sleepTime)*time.Millisecond)
 	
 		if len(rf.refreshTicker) > 0 {
@@ -593,8 +638,7 @@ func (rf *Raft) ticker() {
 		}
 		
 		rf.currentTerm++
-		// log.Printf("slave %d start leader election term : %+v", rf.me, rf.currentTerm)
-
+		// log1.Printf("slave %d start leader election term : %+v", rf.me, rf.currentTerm)
 		rf.voteFor[rf.currentTerm] = true
 
 		wg := &sync.WaitGroup{}
@@ -623,14 +667,19 @@ func (rf *Raft) ticker() {
 				continue
 			} 
 			wg.Add(1)
-			go func (server int)  {
+			var prevLog Log
+			if len (rf.logEntries) > 0{
+				prevLog = *rf.logEntries[len(rf.logEntries)-1]
+			}
+			go func (server int, currentTerm int64, prevLog Log)  {
 				// Output(fmt.Sprintf("slave %d request vote term %d from %d", rf.me, rf.currentTerm, server))
 				// log.Printf("slave %d request vote term %d from %d", rf.me, rf.currentTerm, server)
 				args := &RequestVoteArgs{
-					CurrentTerm: rf.currentTerm,
+					CurrentTerm: currentTerm,
 				}
-				if len (rf.logEntries) > 0{
-					args.LastLog = rf.logEntries[len(rf.logEntries)-1]
+				args.LastLog = &Log{
+					Index: prevLog.Index,
+					Term: prevLog.Term,	
 				}
 				reply := &RequestVoteReply{}
 				// log.Printf("slave %d request vote term %d from %d reply", rf.me, rf.currentTerm, server)
@@ -639,7 +688,7 @@ func (rf *Raft) ticker() {
 				voteReply <- (ok && reply.Vote)
 				wg.Done()
 				// log.Printf("[request server : %+v] slave %d  currentTerm : %+v, res : %+v",server,rf.me, rf.currentTerm, ok&&reply.Vote)
-			}(server)
+			}(server, rf.currentTerm, prevLog)
 		}
 		wg.Wait()
 		if voted > len(rf.peers)/2{
@@ -647,7 +696,7 @@ func (rf *Raft) ticker() {
 		}
 		close(voteReply)
 		rf.heartsbeats()
-		// log.Printf("slave %d end leader election res : %+v, currentTerm : %+v",rf.me,rf.isLeader, rf.currentTerm)
+		// log1.Printf("slave %d end leader election res : %+v, voted : %+v, currentTerm : %+v",rf.me,rf.isLeader, voted, rf.currentTerm)
 		rf.mu.Unlock()
 	}
 }
