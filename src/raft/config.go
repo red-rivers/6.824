@@ -579,7 +579,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
-					log.Printf("server %d commit %d",starts,index1)
+					// log.Printf("server %d commit %d",starts,index1)
 					index = index1
 					break
 				}
