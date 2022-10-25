@@ -20,7 +20,7 @@ package raft
 import (
 	//	"bytes"
 	// "crypto/aes"
-	log1 "log"
+	// log1 "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
