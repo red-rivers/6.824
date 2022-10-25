@@ -20,7 +20,7 @@ package raft
 import (
 	//	"bytes"
 	// "crypto/aes"
-	// log1 "log"
+	log1 "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -503,6 +503,11 @@ func (rf *Raft) heartsbeats(){
 			if !reply.Reject {
 				commit++
 			}
+
+			// log to server network err
+			if !reply.Recive {
+				delete(rf.nextIndex, reply.Server)
+			}
 			// maintain the nextIdx
 			if reply.XTerm == -1 && reply.XIndex != -1 {
 				rf.nextIndex[reply.Server] = int(reply.XIndex)
@@ -533,7 +538,7 @@ func (rf *Raft) heartsbeats(){
 		}
 		
 		// log1.Printf("leader %d end AE and commit is %d, got is %d, commitIdx is %d", rf.me, commit, got, rf.commitIdx)
-		// log1.Printf("this time heartsBeats send %d log, nextIndexMap :%+v, commited : %+v", cnt, rf.nextIndex, commit)
+		// log1.Printf("leader %+v this time heartsBeats send %d log, nextIndexMap :%+v, commited : %+v",rf.me ,cnt, rf.nextIndex, commit)
 	}
 }
 
