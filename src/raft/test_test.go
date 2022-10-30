@@ -1234,3 +1234,50 @@ func TestSnapshotAllCrash2D(t *testing.T) {
 	}
 	cfg.end()
 }
+
+func TestAppendLog(t *testing.T) {
+	source := make([]Log, 0)
+	source = append(source, Log{
+		Index: 1,
+		Term: 1,
+	})
+	source = append(source, Log{
+		Index: 2,
+		Term: 2,
+	})
+	source = append(source, Log{
+		Index: 3,
+		Term: 3,
+	})
+	source = append(source, Log{
+		Index: 4,
+		Term: 4,
+	})
+
+	target := make([]Log, 0)
+	target = append(target, Log{
+		Index: 2,
+		Term: 2,
+	})	
+	target = append(target, Log{
+		Index: 3,
+		Term: 3,
+	})	
+	
+	prevIndex := 1
+	tmp := source[prevIndex:]
+	fmt.Println(tmp)
+	source = source[:prevIndex]
+	fmt.Println(source)
+	for i:=0; i<len(tmp); i++{
+		if len(target) > i && tmp[i].Term != target[i].Term {
+			tmp = tmp[:i]	
+		}
+	}
+	if len(tmp) > len(target) {
+		source = append(source, tmp...)
+	}else{
+		source = append(source, target...)
+	}
+	fmt.Println(source)
+}
