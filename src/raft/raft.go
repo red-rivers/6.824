@@ -90,6 +90,10 @@ type Raft struct {
 
 	role        Role
 	refreshTicker bool
+
+	lastIncludedIndex int
+	lastIncludedTerm int
+	snapShot         []byte
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -210,9 +214,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	DPrintf("[server %d] RequestVote args : %+v, voteFor : %+v", rf.me ,args, rf.voteFor)
 
-	if args.LastLogTerm > rf.getLastLog().Term || 
-	(args.LastLogTerm == rf.getLastLog().Term && args.LastLogIndex >= rf.getLastLog().Index) && 
-	(rf.voteFor == -1 || rf.voteFor == args.CandidateId) {
+	if (args.LastLogTerm > rf.getLastLog().Term || (args.LastLogTerm == rf.getLastLog().Term && args.LastLogIndex >= rf.getLastLog().Index)) && (rf.voteFor == -1 || rf.voteFor == args.CandidateId) {
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
 		rf.refreshTicker = true
@@ -297,7 +299,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		args.PrevLogIndex == 0 {
 			rf.log = rf.appendLog(args.PrevLogIndex, rf.log, args.Entries)
 			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = Min(len(rf.log), args.LeaderCommit)
+				rf.commitIndex = Min(rf.getLastLog().Index, args.LeaderCommit)
 			} 
 			reply.Success = true
 			rf.persist()
@@ -310,7 +312,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.persist()
 		}
 	}else {
-		reply.ConfilctIndex = len(rf.log)+1
+		reply.ConfilctIndex = rf.getLastLog().Index+1
 		reply.Success = false
 	}
 	DPrintf("[server %d] AppendEntries reply : %+v, log: %+v",rf.me, reply, rf.log)
@@ -393,6 +395,9 @@ func (rf *Raft) startElection() {
 					atomic.AddInt32(voted, 1)
 					if *voted > int32(len(rf.peers)/2) {
 						rf.role = Leader
+						for peer := range rf.peers {
+							rf.nextIndex[peer] = rf.getLastLog().Index+1
+						}
 						go rf.sendHeartsBeats()
 						DPrintf("[leader %d] win electioni", rf.me)
 					}
@@ -423,7 +428,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return -1, -1, isLeader
 	}
-	index := len(rf.log)+1
+	index := rf.getLastLog().Index+1
 	term := rf.currentTerm
 	log := Log{
 		Command: command,
@@ -524,9 +529,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make(map[int]int)
 	for peer := range rf.peers {
 		rf.nextIndex[peer] = rf.getLastLog().Index+1
-		if rf.nextIndex[peer] == 0 {
-			DPrintf("nextIdx become zero!!! rf.matchIdx : %+v", rf.nextIndex)
-		}
 	}
 	for peer := range rf.peers {
 		rf.matchIndex[peer] = 0
@@ -546,34 +548,45 @@ func (rf *Raft) getLastLog() Log {
 	if len(rf.log) > 0 {
 		return rf.log[len(rf.log)-1]
 	}
-	return Log{}
+	return Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm}
 }
 
 func (rf *Raft) appendLog(prevIndex int, source []Log, target []Log) []Log{
-	tmp := source[prevIndex:]
-	source = source[:prevIndex]
+	res := make([]Log, 0)
+	tmp := make([]Log, 0)
+	for i:=0; i<len(rf.log); i++{
+		log := rf.log[i]
+		if log.Index <= prevIndex {
+			res = append(res, log)
+		}else{	
+			tmp = append(tmp, log)
+		}
+	}
 	for i:=0; i<len(tmp); i++{
 		if len(target) > i && tmp[i].Term != target[i].Term {
 			tmp = tmp[:i]	
 		}
 	}
 	if len(tmp) > len(target) {
-		source = append(source, tmp...)
+		res = append(res, tmp...)
 	}else{
-		source = append(source, target...)
+		res = append(res, target...)
 	}
-	return source
+	return res
 }
 
 func (rf *Raft) StructureAE(peer int) (Ae AppendEntriesArgs) {
-	nextIdx := Min(rf.nextIndex[peer], len(rf.log)+1)
+	nextIdx := rf.nextIndex[peer]
 	var prevLog Log
-	if nextIdx > 1 {
-		prevLog = rf.log[nextIdx-2]
-	}
 	entries := make([]Log, 0)
-	for i:=nextIdx; i>0&&i<=len(rf.log); i++{
-		entries = append(entries, rf.log[i-1])
+
+	for i:=0; i<len(rf.log); i++{
+		if rf.log[i].Index == nextIdx-1 {
+			prevLog = rf.log[i]
+		}
+		if rf.log[i].Index >= nextIdx {
+			entries = append(entries, rf.log[i])
+		}
 	}
 	Ae.Entries = entries
 	Ae.PrevLogIndex = prevLog.Index
@@ -599,16 +612,13 @@ func (rf *Raft) fallback(peer, prevLogIndex, confictIndex, confilctTerm int) {
 	}else{
 		rf.nextIndex[peer] = confictIndex
 	}
-	if rf.nextIndex[peer] == 0 {
-		DPrintf("nextIdx become zero!!! peer :%+v, prevLogIndex:%+v, confictIndex:%+v, confilctTerm:%+v", peer, prevLogIndex, confictIndex, confilctTerm)
-	}
 }
 
 func (rf *Raft) checkCommit() {
 	for {
 		rf.mu.Lock()
 		if rf.role == Leader {
-			commitIdx := len(rf.log)
+			commitIdx := rf.getLastLog().Index
 			for ;commitIdx>rf.commitIndex;{
 				replicate := 1
 				for peer := range rf.peers{
@@ -634,16 +644,30 @@ func (rf *Raft) checkCommit() {
 func (rf *Raft) applyLog() {
 	for {
 		rf.mu.Lock()
-		for i:=rf.lastApplied; i<rf.commitIndex; i++{
-			log := rf.log[i]
-			msg := ApplyMsg{
-				CommandValid: true,
-				Command: log.Command,
-				CommandIndex: log.Index,
+		if rf.lastApplied != rf.commitIndex {
+			if rf.commitIndex == rf.lastIncludedIndex {
+				msg := ApplyMsg{
+					SnapshotValid: true,
+					SnapshotIndex: rf.lastIncludedIndex,
+					SnapshotTerm: rf.lastIncludedTerm,
+					Snapshot: rf.snapShot,
+				}
+				rf.applyCh <- msg
+				rf.lastApplied = rf.lastIncludedIndex
+				DPrintf("[server %d] apply a snapshot : %+v", rf.me, msg)
 			}
-			rf.applyCh <- msg
-			rf.lastApplied++
-			DPrintf("[server %d] commit log : %+v",rf.me, log)
+			for i:=0; i<len(rf.log); i++{
+				log := rf.log[i]
+				if log.Index > rf.lastApplied && log.Index <= rf.commitIndex{
+					msg := ApplyMsg {
+						CommandValid: true,
+						Command: log.Command,
+						CommandIndex: log.Index,
+					}
+					rf.applyCh <- msg
+					rf.lastApplied = log.Index
+				}
+			}
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(50)*time.Millisecond)
