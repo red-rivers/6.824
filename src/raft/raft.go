@@ -293,27 +293,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.role = Follower
 	rf.refreshTicker = true
 
-	if len (rf.log) >= args.PrevLogIndex {
-		
-		if (args.PrevLogIndex>0 && rf.log[args.PrevLogIndex-1].Index == args.PrevLogIndex && rf.log[args.PrevLogIndex-1].Term == args.PrevLogTerm) ||
-		args.PrevLogIndex == 0 {
-			rf.log = rf.appendLog(args.PrevLogIndex, rf.log, args.Entries)
-			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = Min(rf.getLastLog().Index, args.LeaderCommit)
-			} 
-			reply.Success = true
-			rf.persist()
-		}else {
-			reply.ConfilctTerm = rf.log[args.PrevLogIndex-1].Term
+	success, log := rf.isLogMatch(args.PrevLogIndex, args.PrevLogTerm)
+	if success {
+		rf.log = rf.appendLog(args.PrevLogIndex, rf.log, args.Entries)
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = Min(rf.getLastLog().Index, args.LeaderCommit)
+		} 
+		reply.Success = true
+		rf.persist()
+	}else {
+		if log != nil{
+			reply.ConfilctTerm = log.Term
 			i := args.PrevLogIndex-1
 			for; i>=0 && rf.log[i].Term == reply.ConfilctTerm; i--{}
 			reply.ConfilctIndex = rf.log[i+1].Index
 			reply.Success = false
 			rf.persist()
+		}else {
+			reply.ConfilctIndex = rf.getLastLog().Index+1
+			reply.Success = false
 		}
-	}else {
-		reply.ConfilctIndex = rf.getLastLog().Index+1
-		reply.Success = false
 	}
 	DPrintf("[server %d] AppendEntries reply : %+v, log: %+v",rf.me, reply, rf.log)
 }
@@ -575,6 +574,26 @@ func (rf *Raft) appendLog(prevIndex int, source []Log, target []Log) []Log{
 	return res
 }
 
+func (rf *Raft) isLogMatch(prevLogIndex, prevLogTerm int) (bool, *Log) {
+	if prevLogIndex == rf.lastIncludedIndex && prevLogTerm == rf.lastIncludedTerm {
+		return true, nil
+	}
+	var matchLog *Log
+	for i:=0; i<len(rf.log); i++{
+		log := rf.log[i]
+		if log.Index == prevLogIndex {
+			matchLog = &log
+		}
+	}
+	if matchLog == nil {
+		return false, nil
+	}
+	if matchLog.Term != prevLogTerm {
+		return false, matchLog
+	}
+	return true, matchLog
+}
+
 func (rf *Raft) StructureAE(peer int) (Ae AppendEntriesArgs) {
 	nextIdx := rf.nextIndex[peer]
 	var prevLog Log
@@ -645,27 +664,33 @@ func (rf *Raft) applyLog() {
 	for {
 		rf.mu.Lock()
 		if rf.lastApplied != rf.commitIndex {
-			if rf.commitIndex == rf.lastIncludedIndex {
-				msg := ApplyMsg{
-					SnapshotValid: true,
-					SnapshotIndex: rf.lastIncludedIndex,
-					SnapshotTerm: rf.lastIncludedTerm,
-					Snapshot: rf.snapShot,
+			for i:=0; i<=len(rf.log); i++{
+				var log Log
+				if i==0 {
+					log = Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm}
+				}else {
+					log = rf.log[i-1]
 				}
-				rf.applyCh <- msg
-				rf.lastApplied = rf.lastIncludedIndex
-				DPrintf("[server %d] apply a snapshot : %+v", rf.me, msg)
-			}
-			for i:=0; i<len(rf.log); i++{
-				log := rf.log[i]
-				if log.Index > rf.lastApplied && log.Index <= rf.commitIndex{
-					msg := ApplyMsg {
-						CommandValid: true,
-						Command: log.Command,
-						CommandIndex: log.Index,
+				if log.Index > rf.lastApplied && log.Index <= rf.commitIndex {
+					if i==0 {
+						msg := ApplyMsg{
+							SnapshotValid: true,
+							SnapshotIndex: rf.lastIncludedIndex,
+							SnapshotTerm: rf.lastIncludedTerm,
+							Snapshot: rf.snapShot,
+						}
+						rf.applyCh <- msg
+						rf.lastApplied = rf.lastIncludedIndex
+						DPrintf("[server %d] apply a snapshot : %+v", rf.me, msg)
+					}else {
+						msg := ApplyMsg {
+							CommandValid: true,
+							Command: log.Command,
+							CommandIndex: log.Index,
+						}
+						rf.applyCh <- msg
+						rf.lastApplied = log.Index
 					}
-					rf.applyCh <- msg
-					rf.lastApplied = log.Index
 				}
 			}
 		}
