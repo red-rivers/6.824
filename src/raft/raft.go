@@ -93,7 +93,7 @@ type Raft struct {
 
 	lastIncludedIndex int
 	lastIncludedTerm int
-	snapShot         []byte
+	snapshot         []byte
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -125,8 +125,11 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.voteFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	// rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
 }
 
 
@@ -143,7 +146,9 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	if d.Decode(&rf.currentTerm) != nil ||
 	   d.Decode(&rf.voteFor) != nil || 
-	   d.Decode(&rf.log) != nil {
+	   d.Decode(&rf.log) != nil ||
+	   d.Decode(&rf.lastIncludedIndex) != nil || 
+	   d.Decode(&rf.lastIncludedTerm) != nil{
 	  DPrintf("readPersist err,  data : %+v", data)
 	}
 }
@@ -165,10 +170,65 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if index <= rf.lastIncludedIndex {
+		return
+	}
+
+	newLog := make([]Log, 0)
+	var snapLog Log
+	for i:=0; i<len(rf.log); i++{
+		log := rf.log[i]
+		if log.Index == index{
+			snapLog = log
+		}
+		if log.Index > index {
+			newLog = append(newLog, log)
+		}
+	}
+	rf.log = newLog
+	rf.lastIncludedIndex = snapLog.Index
+	rf.lastIncludedTerm = snapLog.Term
+	rf.snapshot = snapshot
+	rf.persist()
 }
 
+type InstallSnapshotArgs struct{
+	Term int
+	LeaderId int
+	LastIncludedIndex int
+	LastIncludedTerm int
+	SnapShot []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	if args.LastIncludedIndex <= rf.lastIncludedIndex || args.LastIncludedTerm < rf.lastIncludedTerm {
+		return
+	}
+	rf.log = make([]Log, 0)
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.snapshot = args.SnapShot
+	rf.persist()
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
 
 //
 // example RequestVote RPC arguments structure.
@@ -524,6 +584,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.snapshot = rf.persister.ReadSnapshot()
 	rf.nextIndex = make(map[int]int)
 	rf.matchIndex = make(map[int]int)
 	for peer := range rf.peers {
@@ -629,7 +690,30 @@ func (rf *Raft) fallback(peer, prevLogIndex, confictIndex, confilctTerm int) {
 	if searchIdx != -1 {
 		rf.nextIndex[peer] = rf.log[searchIdx].Index
 	}else{
-		rf.nextIndex[peer] = confictIndex
+		if len(rf.log) > 0 && confictIndex < rf.log[0].Index {
+			args := &InstallSnapshotArgs{
+				Term: rf.currentTerm,
+				LeaderId: rf.me,
+				SnapShot: rf.snapshot,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm: rf.lastIncludedTerm,
+			}	
+			go func (peer int, args *InstallSnapshotArgs)  {
+				reply := &InstallSnapshotReply{}
+				if ok := rf.sendInstallSnapshot(peer, args, reply); ok {
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+					if reply.Term > rf.currentTerm {
+						rf.voteFor = -1
+						rf.currentTerm = reply.Term
+						rf.role = Follower
+						rf.persist()
+					}
+				}
+			}(peer,args)
+		}else {
+			rf.nextIndex[peer] = confictIndex
+		}
 	}
 }
 
@@ -677,7 +761,7 @@ func (rf *Raft) applyLog() {
 							SnapshotValid: true,
 							SnapshotIndex: rf.lastIncludedIndex,
 							SnapshotTerm: rf.lastIncludedTerm,
-							Snapshot: rf.snapShot,
+							Snapshot: rf.snapshot,
 						}
 						rf.applyCh <- msg
 						rf.lastApplied = rf.lastIncludedIndex
