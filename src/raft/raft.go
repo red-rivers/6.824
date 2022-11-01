@@ -172,27 +172,28 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	DPrintf("[server %d] Snapshot call index : %+v, log : %+v",rf.me, index, rf.log)
 	if index <= rf.lastIncludedIndex {
 		return
 	}
 
 	newLog := make([]Log, 0)
-	var snapLog Log
 	for i:=0; i<len(rf.log); i++{
 		log := rf.log[i]
-		if log.Index == index{
-			snapLog = log
-		}
-		if log.Index > index {
-			newLog = append(newLog, log)
+		if log.Index >= index {
+			if log.Index == index {
+				rf.lastIncludedIndex = log.Index
+				rf.lastIncludedTerm = log.Term
+				newLog = append(newLog, Log{Index:log.Index, Term: log.Term})
+			}else{
+				newLog = append(newLog, log)
+			}
 		}
 	}
 	rf.log = newLog
-	rf.lastIncludedIndex = snapLog.Index
-	rf.lastIncludedTerm = snapLog.Term
 	rf.snapshot = snapshot
 	rf.persist()
+	DPrintf("[server %d] SnapShot call end log : %+v, lastIncludedIndex: %+v, lastIncludedTerm : %+v", rf.me, rf.log, rf.lastIncludedIndex, rf.lastIncludedTerm)
 }
 
 type InstallSnapshotArgs struct{
@@ -210,7 +211,7 @@ type InstallSnapshotReply struct {
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	DPrintf("[server %d] InstallSnapshot call args : %+v, log : %+v",rf.me, args, rf.log)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		return
@@ -219,10 +220,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	rf.log = make([]Log, 0)
+	rf.log = append(rf.log, Log{Index: args.LastIncludedIndex, Term: args.LastIncludedTerm})
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.snapshot = args.SnapShot
 	rf.persist()
+	DPrintf("[server %d] InstallSnapshot call reply : %+v, lastIncludedIndex: %+v, lastIncludeTerm : %+v",rf.me, reply, rf.lastIncludedIndex, rf.lastIncludedTerm)
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -336,7 +339,9 @@ type AppendEntriesReply struct {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	DPrintf("[server %d] AppendEntries args : %+v, reply : %+v",rf.me, args, reply)
+	if len(args.Entries) != 0{
+		DPrintf("[server %d] AppendEntries args : %+v, reply : %+v",rf.me, args, reply)
+	}
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
@@ -364,7 +369,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}else {
 		if log != nil{
 			reply.ConfilctTerm = log.Term
-			i := args.PrevLogIndex-1
+			i := args.PrevLogIndex-(rf.getLastLog().Index-len(rf.log))-1
 			for; i>=0 && rf.log[i].Term == reply.ConfilctTerm; i--{}
 			reply.ConfilctIndex = rf.log[i+1].Index
 			reply.Success = false
@@ -374,7 +379,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.Success = false
 		}
 	}
-	DPrintf("[server %d] AppendEntries reply : %+v, log: %+v",rf.me, reply, rf.log)
+	if len(args.Entries) != 0{
+		DPrintf("[server %d] AppendEntries reply : %+v, log: %+v",rf.me, reply, rf.log)
+	}
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -608,7 +615,7 @@ func (rf *Raft) getLastLog() Log {
 	if len(rf.log) > 0 {
 		return rf.log[len(rf.log)-1]
 	}
-	return Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm}
+	return Log{}
 }
 
 func (rf *Raft) appendLog(prevIndex int, source []Log, target []Log) []Log{
@@ -657,14 +664,20 @@ func (rf *Raft) isLogMatch(prevLogIndex, prevLogTerm int) (bool, *Log) {
 
 func (rf *Raft) StructureAE(peer int) (Ae AppendEntriesArgs) {
 	nextIdx := rf.nextIndex[peer]
-	var prevLog Log
+	prevLog := Log{
+		Index: rf.lastIncludedIndex,
+		Term: rf.lastIncludedTerm,
+	}
 	entries := make([]Log, 0)
 
 	for i:=0; i<len(rf.log); i++{
+		// if rf.log[i].Command == nil{
+		// 	continue
+		// }
 		if rf.log[i].Index == nextIdx-1 {
 			prevLog = rf.log[i]
 		}
-		if rf.log[i].Index >= nextIdx {
+		if rf.log[i].Index >= nextIdx && rf.log[i].Command != nil{
 			entries = append(entries, rf.log[i])
 		}
 	}
@@ -675,22 +688,29 @@ func (rf *Raft) StructureAE(peer int) (Ae AppendEntriesArgs) {
 	Ae.LeaderId = rf.me
 	Ae.Term = rf.currentTerm
 
-	DPrintf("[leader %d to server %d] AppendEntries args : %+v, nextIdx is %+v",rf.me, peer, Ae, nextIdx)
+	if len(Ae.Entries) != 0 {
+		DPrintf("[leader %d to server %d] AppendEntries args : %+v, nextIdx is %+v",rf.me, peer, Ae, nextIdx)
+	}
 
 	return Ae
 }
 
 func (rf *Raft) fallback(peer, prevLogIndex, confictIndex, confilctTerm int) {
-	searchIdx := prevLogIndex-1
+	searchIdx := prevLogIndex-(rf.getLastLog().Index-len(rf.log))-1
 	for ;searchIdx>=0; searchIdx--{
 		if rf.log[searchIdx].Term == confilctTerm {
 			break
 		}
 	}
-	if searchIdx != -1 {
+
+	DPrintf("[leader %d] fallback peer,prevLogIndex,conflicIndex, configTerm : %+v, %+v, %+v, %+v, searchIdx : %+v", rf.me, peer, prevLogIndex, confictIndex, confilctTerm, searchIdx)
+
+	if searchIdx >= 0 && rf.log[searchIdx].Index <= confictIndex{
 		rf.nextIndex[peer] = rf.log[searchIdx].Index
 	}else{
-		if len(rf.log) > 0 && confictIndex < rf.log[0].Index {
+		DPrintf("[leader %d] rf.log: %+v",rf.me, rf.log)
+		if len(rf.log) > 0 && (confictIndex < rf.log[0].Index || 
+			(confictIndex == rf.log[0].Index && rf.log[0].Command == nil)) {
 			args := &InstallSnapshotArgs{
 				Term: rf.currentTerm,
 				LeaderId: rf.me,
@@ -721,23 +741,21 @@ func (rf *Raft) checkCommit() {
 	for {
 		rf.mu.Lock()
 		if rf.role == Leader {
-			commitIdx := rf.getLastLog().Index
-			for ;commitIdx>rf.commitIndex;{
+			for i:=len(rf.log)-1; i>=0; i--{
 				replicate := 1
 				for peer := range rf.peers{
 					if peer == rf.me{
 						continue
 					}
-					if rf.matchIndex[peer] >= commitIdx {
+					if rf.matchIndex[peer] >= rf.log[i].Index {
 						replicate++
 					}
 				}
-				if replicate > len(rf.peers)/2 && rf.log[commitIdx-1].Term == rf.currentTerm{
-					rf.commitIndex = commitIdx
+				if replicate > len(rf.peers)/2 && rf.log[i].Term == rf.currentTerm{
+					rf.commitIndex = rf.log[i].Index
 					break
 				}
-				commitIdx--
-			}	
+			}
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(50)*time.Millisecond)
@@ -746,39 +764,42 @@ func (rf *Raft) checkCommit() {
 
 func (rf *Raft) applyLog() {
 	for {
+		msgs := make([]ApplyMsg, 0)
 		rf.mu.Lock()
 		if rf.lastApplied != rf.commitIndex {
-			for i:=0; i<=len(rf.log); i++{
-				var log Log
-				if i==0 {
-					log = Log{Index: rf.lastIncludedIndex, Term: rf.lastIncludedTerm}
-				}else {
-					log = rf.log[i-1]
-				}
+			for i:=0; i<len(rf.log); i++{
+				log := rf.log[i]
 				if log.Index > rf.lastApplied && log.Index <= rf.commitIndex {
-					if i==0 {
+					if log.Index == rf.lastIncludedIndex {
 						msg := ApplyMsg{
 							SnapshotValid: true,
 							SnapshotIndex: rf.lastIncludedIndex,
 							SnapshotTerm: rf.lastIncludedTerm,
 							Snapshot: rf.snapshot,
 						}
-						rf.applyCh <- msg
-						rf.lastApplied = rf.lastIncludedIndex
-						DPrintf("[server %d] apply a snapshot : %+v", rf.me, msg)
+						msgs = append(msgs, msg)
+						rf.lastApplied = log.Index
 					}else {
 						msg := ApplyMsg {
 							CommandValid: true,
 							Command: log.Command,
 							CommandIndex: log.Index,
 						}
-						rf.applyCh <- msg
+						msgs = append(msgs, msg)
 						rf.lastApplied = log.Index
 					}
 				}
 			}
 		}
 		rf.mu.Unlock()
+		for i:=0; i<len(msgs); i++{
+			rf.applyCh <- msgs[i]
+			if msgs[i].CommandValid {
+				DPrintf("[server %d] apply a log : %+v", rf.me, msgs[i])
+			}else{
+				DPrintf("[server %d] apply a snapshot : %+v", rf.me, msgs[i])
+			}
+		}
 		time.Sleep(time.Duration(50)*time.Millisecond)
 	}
 }
