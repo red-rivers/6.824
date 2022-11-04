@@ -1,15 +1,17 @@
 package kvraft
 
 import (
-	"6.824/labgob"
-	"6.824/labrpc"
-	"6.824/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -20,9 +22,10 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	UUid int64
+	Key string
+	Op string
+	Value string
 }
 
 type KVServer struct {
@@ -33,17 +36,110 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
+	applyMap map[int64]bool
+	repChMap map[int64]chan bool
+	kvMap map[string]string
+	
 
 	// Your definitions here.
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
+	kv.mu.Lock()
+	DPrintf("[server %d] Get Call args : %+v", kv.me, args)
+	op := Op {
+		UUid: args.UUid,
+		Key: args.Key,
+	}
+	repCh := make(chan bool, 1)
+	if ok := kv.applyMap[args.UUid]; !ok {
+		kv.rf.Start(op)
+		kv.repChMap[args.UUid] = repCh	
+	} else {
+		repCh <- true
+	}
+	kv.mu.Unlock()
+	select {
+	case <-repCh:{
+		kv.mu.Lock()
+		val, ok := kv.kvMap[args.Key]
+		if !ok {
+			reply.Err = ErrNoKey
+		}else {
+			reply.Value = val
+		}
+		kv.mu.Unlock()
+		break
+	}
+	case <-time.After(time.Duration(50)*time.Millisecond):{	
+		reply.Err = ErrWrongLeader
+		break
+	}
+	}
+	DPrintf("[server %d] Get call reply : %+v",kv.me, reply)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	kv.mu.Lock()
+	DPrintf("[server %d] PutAppend call args : %+v",kv.me ,args)
+	op := Op{
+		UUid: args.UUid,
+		Key: args.Key,
+		Op: args.Op,
+		Value: args.Value,
+	}
+	if ok := kv.applyMap[args.UUid]; ok{
+		kv.mu.Unlock()
+		return
+	}
+	_, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	repCh := make(chan bool, 1)
+	kv.repChMap[args.UUid] = repCh
+	kv.mu.Unlock()
+	select {
+	case <-repCh:{
+		break
+	}
+	case <-time.After(time.Duration(50)*time.Millisecond):{	
+		reply.Err = ErrWrongLeader
+		delete(kv.repChMap, args.UUid)
+		break
+	}
+	}
+
+	DPrintf("[server %d] PutAppend call reply : %+v",kv.me, reply)
+}
+
+func (kv *KVServer) TackleApplyMsg() {
+	for msg := range kv.applyCh {
+		kv.mu.Lock()
+		DPrintf("[server %d] revice applyMsg : %+v", kv.me, msg)
+		op := msg.Command.(Op)
+		if repCh, ok := kv.repChMap[op.UUid]; ok {
+			if len(repCh) == 1 {
+				<-repCh
+			}
+			repCh <- true
+		}
+		if _, ok := kv.applyMap[op.UUid]; !ok {
+			if op.Op == "Put" || op.Op == "Append" {
+				val := kv.kvMap[op.Key]
+				if op.Op == "Put" {
+					val = ""
+				}
+				val = val + op.Value
+				kv.kvMap[op.Key] = val
+			}
+			kv.applyMap[op.UUid] = true
+		}
+		kv.mu.Unlock()
+	}
 }
 
 //
@@ -94,6 +190,13 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	kv.applyMap = make(map[int64]bool)
+	kv.repChMap = make(map[int64]chan bool)
+
+	kv.kvMap = make(map[string]string)
+
+	go kv.TackleApplyMsg()
 
 	// You may need initialization code here.
 

@@ -1,8 +1,13 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+
+	"6.824/labrpc"
+
+	"math/big"
+	rand1 "math/rand"
+)
 
 
 type Clerk struct {
@@ -37,9 +42,21 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	uuid := nrand()
+	value := ""
+	for ;; {
+		server := rand1.Int()%len(ck.servers)
+		args := &GetArgs{
+			UUid: uuid,
+			Key: key,
+		}
+		reply := &GetReply{}
+		if ok := ck.servers[server].Call("KVServer.Get", args, reply); ok && reply.Err != ErrWrongLeader{
+			value = reply.Value
+			break
+		}
+	}
+	return value
 }
 
 //
@@ -53,8 +70,26 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	uuid := nrand()
+	for ;; {
+		server := rand1.Int()%len(ck.servers)
+		args := &PutAppendArgs{
+			UUid: uuid,
+			Key: key,
+			Op: op,
+			Value: value,
+		}
+		reply := &PutAppendReply{}
+		if ok := ck.servers[server].Call("KVServer.PutAppend", args, reply); ok && reply.Err == ""{
+			break
+		}
+	}
 }
+
+// func (ck *Clerk) GetUUid () string {
+// 	uuid, _ := exec.Command("uuidgen").Output()
+// 	return string(uuid)
+// }
 
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")

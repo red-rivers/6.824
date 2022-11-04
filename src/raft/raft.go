@@ -502,6 +502,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index: index,
 	}
 	rf.log = append(rf.log, log)
+	go rf.sendHeartsBeats()
 	DPrintf("[leader %d] recive command : %+v", rf.me, log)
 	rf.persist()
 	return index, term, isLeader
@@ -758,7 +759,7 @@ func (rf *Raft) checkCommit() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(time.Duration(50)*time.Millisecond)
+		time.Sleep(time.Duration(10)*time.Millisecond)
 	}
 }
 
@@ -800,6 +801,6 @@ func (rf *Raft) applyLog() {
 				DPrintf("[server %d] apply a snapshot : %+v", rf.me, msgs[i])
 			}
 		}
-		time.Sleep(time.Duration(50)*time.Millisecond)
+		time.Sleep(time.Duration(10)*time.Millisecond)
 	}
 }
