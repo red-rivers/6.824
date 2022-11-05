@@ -2,6 +2,8 @@ package kvraft
 
 import (
 	"crypto/rand"
+	"sync"
+	"sync/atomic"
 
 	"6.824/labrpc"
 
@@ -12,6 +14,10 @@ import (
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
+
+	mu *sync.Mutex
+	reqId int64
+	clientId int64
 	// You will have to modify this struct.
 }
 
@@ -25,6 +31,10 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.mu = &sync.Mutex{}
+
+	ck.clientId = nrand()
+
 	// You'll have to add code here.
 	return ck
 }
@@ -42,12 +52,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	uuid := nrand()
+	rid := atomic.AddInt64(&ck.reqId, 1)
 	value := ""
 	for ;; {
 		server := rand1.Int()%len(ck.servers)
 		args := &GetArgs{
-			UUid: uuid,
+			ClientId: ck.clientId,
+			ReqId: rid,
 			Key: key,
 		}
 		reply := &GetReply{}
@@ -70,11 +81,13 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	uuid := nrand()
+	rid := atomic.AddInt64(&ck.reqId, 1)
 	for ;; {
 		server := rand1.Int()%len(ck.servers)
 		args := &PutAppendArgs{
-			UUid: uuid,
+			ReqId: rid,
+			ClientId: ck.clientId,
+			
 			Key: key,
 			Op: op,
 			Value: value,

@@ -10,7 +10,9 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	UUid  int64
+	ReqId  int64
+	ClientId int64
+
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
@@ -24,7 +26,9 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	UUid int64
+	ReqId int64
+	ClientId int64
+	
 	Key string
 	// You'll have to add definitions here.
 }
