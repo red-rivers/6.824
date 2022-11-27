@@ -307,6 +307,10 @@ func (sc *ShardCtrler) deepCopy() {
 	sc.configs = append(sc.configs, config)
 }
 
+func DefaultConfig() Config {
+	return Config{}
+}
+
 //
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything

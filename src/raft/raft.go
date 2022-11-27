@@ -54,6 +54,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -529,6 +530,12 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) Me() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.me
+}
+
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
@@ -785,6 +792,7 @@ func (rf *Raft) applyLog() {
 							CommandValid: true,
 							Command: log.Command,
 							CommandIndex: log.Index,
+							CommandTerm: log.Term,
 						}
 						msgs = append(msgs, msg)
 						rf.lastApplied = log.Index

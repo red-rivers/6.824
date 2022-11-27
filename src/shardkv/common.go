@@ -14,31 +14,55 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrOutDated    = "ErrOutDated"
+	ErrNotReady    = "ErrNotReady"
+)
+
+const (
+	OpGet    = "Get"
+	OpPut    = "Put"
+	OpAppend = "Append"
 )
 
 type Err string
 
-// Put or Append
-type PutAppendArgs struct {
-	// You'll have to add definitions here.
+type CommandRequest struct {
 	Key   string
 	Value string
 	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+
+	ClientId  int64
+	CommandId int64
 }
 
-type PutAppendReply struct {
-	Err Err
-}
-
-type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
-}
-
-type GetReply struct {
+type CommandResponse struct {
 	Err   Err
 	Value string
+}
+
+type ShardOperationRequest struct {
+	ConfigNum int
+	ShardIDs  []int
+}
+
+type ShardOperationResponse struct {
+	Err            Err
+	ConfigNum      int
+	Shards         map[int]map[string]string
+	LastOperations map[int64]OperationContext
+}
+
+type OperationContext struct {
+	MaxAppliedCommandId    int64
+	LastResponse *CommandResponse
+}
+
+func (op *OperationContext) deepCopy () OperationContext {
+	return OperationContext{
+		MaxAppliedCommandId: op.MaxAppliedCommandId,
+		LastResponse: &CommandResponse{
+			Err: op.LastResponse.Err,
+			Value: op.LastResponse.Value,	
+		},
+	}
 }
