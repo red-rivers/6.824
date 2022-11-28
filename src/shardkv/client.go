@@ -59,7 +59,7 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, makeEnd func(string) *labrpc.ClientE
 		makeEnd:   makeEnd,
 		leaderIds: make(map[int]int),
 		clientId:  nrand(),
-		commandId: 0,
+		commandId: 1,
 	}
 	ck.config = ck.sm.Query(-1)
 	return ck

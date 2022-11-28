@@ -14,7 +14,7 @@ import (
 )
 
 // Debugging
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -133,7 +133,7 @@ func (kv *ShardKV) Execute(command Command, response *CommandResponse) {
 	kv.notifyChans[commandIndex] = notifyChan
 	kv.mu.Unlock()
 	select {
-	case response = <-notifyChan: {
+	case response = <-notifyChan:{
 		break
 	}
 	case <-time.After(time.Duration(50)*time.Millisecond):{
@@ -145,11 +145,13 @@ func (kv *ShardKV) Execute(command Command, response *CommandResponse) {
 
 func (kv *ShardKV) updateShardStatus(config *shardctrler.Config) {
 	for shardId, _ := range kv.currentConfig.Shards {
-		if kv.lastConfig.Shards[shardId] != kv.gid && kv.currentConfig.Shards[shardId] == kv.gid {
+		if kv.currentConfig.Shards[shardId] != kv.gid && config.Shards[shardId] == kv.gid {
 			kv.stateMachines[shardId] = NewShard()
-			kv.stateMachines[shardId].Status = Pulling
+			if kv.currentConfig.Shards[shardId] != 0 {
+				kv.stateMachines[shardId].Status = Pulling
+			}
 		} 
-		if kv.lastConfig.Shards[shardId] == kv.gid && kv.currentConfig.Shards[shardId] != kv.gid {
+		if kv.currentConfig.Shards[shardId] == kv.gid && config.Shards[shardId] != kv.gid {
 			kv.stateMachines[shardId].Status = BePulling
 		}
 	}
@@ -157,15 +159,14 @@ func (kv *ShardKV) updateShardStatus(config *shardctrler.Config) {
 
 func (kv *ShardKV) getShardIDsByStatus(status ShardStatus) map[int][]int {
 	gid2shardIDs := make(map[int][]int)
-	for shardId, gid := range kv.currentConfig.Shards {
-		if gid == kv.gid {
-			if kv.stateMachines[shardId].Status == status {
-				if gid2shardIDs[gid] == nil {
-					gid2shardIDs[gid] = make([]int, 0)
-				}
-				gid2shardIDs[gid] = append(gid2shardIDs[gid], shardId)
+	for shardId, gid := range kv.lastConfig.Shards {
+		if kv.stateMachines[shardId].Status == status {
+			if gid2shardIDs[gid] == nil {
+				gid2shardIDs[gid] = make([]int, 0)
 			}
+			gid2shardIDs[gid] = append(gid2shardIDs[gid], shardId)
 		}
+	
 	}
 	return gid2shardIDs
 }
@@ -192,7 +193,15 @@ func (kv *ShardKV) takeSnapshot(commandIndex int) {
 }
 
 func (kv *ShardKV) restoreSnapshot(snapshot []byte) {
-	
+
+}
+
+func (kv *ShardKV) getShardStatus() map[int]string {
+	status := make(map[int]string)
+	for shardId, shard := range kv.stateMachines {
+		status[shardId] = shard.status()
+	}
+	return status
 }
 
 
